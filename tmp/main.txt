@@ -1,0 +1,458 @@
+#include "../include/camera.hpp"
+#include "../include/object.hpp"
+#include "../include/ray.hpp"
+#include "../include/shape.hpp"
+#include "../include/utilities.hpp"
+#include "../include/utilities.hpp"
+#include "../include/vec3.hpp"
+#include "../include/material.hpp"
+#include "../include/lambertian.hpp"
+#include "../include/metal.hpp"
+#include "../include/color.hpp"
+#include "../include/dielectric.hpp"
+#include "../include/random.hpp"
+#include "../include/clock.hpp"
+#include "../include/texture.hpp"
+#include "../include/BVH.hpp"
+#include "../include/light.hpp"
+#include "../include/constant_medium.hpp"
+#include "../include/texture.hpp"
+#include <memory>
+
+using namespace ZrRender;
+static object_group world;
+static bvh_node     world_box;
+
+// 随机构建场景
+object_group& random_scene() {
+
+    auto checker         = make_shared<checker_texture>(color(0.2, 0.3, 0.1), color(0.9, 0.9, 0.9));
+    auto ground_material = make_shared<lambertian>(checker);
+    world.add(make_shared<sphere>(point3(0, -1000, 0), point3(0, -1000, 0), 0.0, 1.0, 1000, ground_material));
+
+    for (int a = -11; a < 11; a++) {
+        for (int b = -11; b < 11; b++) {
+            auto   choose_mat = random_double();
+            point3 center(a + 0.9 * random_double(), 0.2, b + 0.9 * random_double());
+
+            if ((center - point3(4, 0.2, 0)).length() > 0.9) {
+                std::shared_ptr<material> sphere_material;
+
+                if (choose_mat < 0.8) {
+                    // diffuse
+                    auto albedo     = random_vec() * random_vec();
+                    sphere_material = make_shared<lambertian>(albedo);
+                    // 移动的小球
+                    auto center2 = center + vec3(0, random_double(0, 0.5), 0);
+                    world.add(make_shared<sphere>(center, center2, 0.0, 1.0, 0.2, sphere_material));
+                } else if (choose_mat < 0.9) {
+                    // metal
+                    auto albedo     = random_vec(0.5, 1);
+                    auto fuzz       = random_double(0, 0.5);
+                    sphere_material = make_shared<metal>(albedo, fuzz);
+                    world.add(make_shared<sphere>(center, center, 0.0, 1.0, 0.2, sphere_material));
+                } else {
+                    // glass
+                    sphere_material = make_shared<dielectric>(1.5);
+                    world.add(make_shared<sphere>(center, center, 0.0, 1.0, 0.2, sphere_material));
+                }
+            }
+        }
+    }
+
+    auto material1 = make_shared<dielectric>(1.5);
+    world.add(make_shared<sphere>(point3(0, 1, 0), point3(0, 1, 0), 0.0, 1.0, 1.0, material1));
+
+    auto material2 = make_shared<lambertian>(color(0.4, 0.2, 0.1));
+    world.add(make_shared<sphere>(point3(-4, 1, 0), point3(-4, 1, 0), 0.0, 1.0, 1.0, material2));
+
+    auto material3 = make_shared<metal>(color(0.7, 0.6, 0.5), 0.0);
+    world.add(make_shared<sphere>(point3(4, 1, 0), point3(4, 1, 0), 0.0, 1.0, 1.0, material3));
+
+    return world;
+}
+
+object_group& two_spheres() {
+    auto checker = make_shared<checker_texture>(color(0.2, 0.3, 0.1), color(0.9, 0.9, 0.9));
+    world.add(make_shared<sphere>(point3(0, -1000, 0), point3(0, -1000, 0), 0.0, 1.0, 1000,
+                                  make_shared<lambertian>(checker)));
+    world.add(make_shared<sphere>(point3(0, 2, 0), point3(0, 2, 0), 0.0, 1.0, 2, make_shared<lambertian>(checker)));
+
+    return world;
+}
+
+// Perlin噪声测试场景
+object_group& two_perlin_spheres() {
+    auto pertext = make_shared<perlin_noise_texture>(4);
+    world.add(make_shared<sphere>(point3(0, -1000, 0), point3(0, -1000, 0), 0.0, 1.0, 1000,
+                                  make_shared<lambertian>(pertext)));
+    world.add(make_shared<sphere>(point3(0, 2, 0), point3(0, 2, 0), 0.0, 1.0, 2, make_shared<lambertian>(pertext)));
+
+    return world;
+}
+
+object_group& simple_light() {
+    auto pertext = make_shared<perlin_noise_texture>(4);
+    world.add(make_shared<sphere>(point3(0, -1000, 0), point3(0, -1000, 0), 0.0, 1.0, 1000,
+                                  make_shared<lambertian>(pertext)));
+    world.add(make_shared<sphere>(point3(0, 2, 0), point3(0, 2, 0), 0.0, 1.0, 2, make_shared<lambertian>(pertext)));
+
+    auto difflight = make_shared<diffuse_light>(color(4, 4, 4));
+    world.add(make_shared<xy_rect>(3, 5, 1, 3, -2, difflight));
+
+    return world;
+}
+
+object_group& image_texture_scene() {  // Cornell Box场景
+    std::string TexturePath   = "C:\\Program User\\code\\ZrRender\\texture\\texture.jpg";
+    auto        earth_texture = make_shared<image_texture>(TexturePath.c_str());
+    auto        earth_surface = make_shared<lambertian>(earth_texture);
+
+    world.add(make_shared<sphere>(point3(0, 0, 0), point3(0, 0, 0), 0.0, 1.0, 2, earth_surface));
+
+    return world;
+}
+
+object_group& cornell_box1() {  // Cornell Box场景
+    object_group walls;
+    auto         red   = make_shared<lambertian>(color(.65, .05, .05));
+    auto         white = make_shared<lambertian>(color(.73, .73, .73));
+    auto         green = make_shared<lambertian>(color(.12, .45, .15));
+    auto         light = make_shared<diffuse_light>(color(15, 15, 15));
+
+    walls.add(make_shared<yz_rect>(0, 555, 0, 555, 555, green));
+    walls.add(make_shared<yz_rect>(0, 555, 0, 555, 0, red));
+    walls.add(make_shared<xz_rect>(213, 343, 227, 332, 554, light));
+    walls.add(make_shared<xz_rect>(0, 555, 0, 555, 0, white));
+    walls.add(make_shared<xz_rect>(0, 555, 0, 555, 555, white));
+    walls.add(make_shared<xy_rect>(0, 555, 0, 555, 555, white));
+
+    world.add(make_shared<bvh_node>(walls, 0, 6));
+
+    object_group       boxs;
+    shared_ptr<object> box1 = make_shared<box>(point3(0, 0, 0), point3(165, 330, 165), white);
+    box1                    = make_shared<rotate_y>(box1, 15);
+    box1                    = make_shared<translate>(box1, vec3(265, 0, 295));
+    boxs.add(box1);
+
+    shared_ptr<object> box2 = make_shared<box>(point3(0, 0, 0), point3(165, 165, 165), white);
+    box2                    = make_shared<rotate_y>(box2, -18);
+    box2                    = make_shared<translate>(box2, vec3(130, 0, 65));
+    boxs.add(box2);
+
+    world.add(make_shared<bvh_node>(boxs, 0, 2));
+    return world;
+}
+
+bvh_node& cornell_box2() {
+    object_group objects;
+
+    auto red   = make_shared<lambertian>(color(.65, .05, .05));
+    auto white = make_shared<lambertian>(color(.73, .73, .73));
+    auto green = make_shared<lambertian>(color(.12, .45, .15));
+    auto light = make_shared<diffuse_light>(color(15, 15, 15));
+
+    objects.add(make_shared<yz_rect>(0, 555, 0, 555, 555, green));
+    objects.add(make_shared<yz_rect>(0, 555, 0, 555, 0, red));
+    objects.add(make_shared<xz_rect>(213, 343, 227, 332, 554, light));
+    objects.add(make_shared<xz_rect>(0, 555, 0, 555, 0, white));
+    objects.add(make_shared<xz_rect>(0, 555, 0, 555, 555, white));
+    objects.add(make_shared<xy_rect>(0, 555, 0, 555, 555, white));
+
+    objects.add(make_shared<box>(point3(130, 0, 65), point3(295, 165, 230), white));
+    objects.add(make_shared<box>(point3(265, 0, 295), point3(430, 330, 460), white));
+
+    shared_ptr<material> aluminum = make_shared<metal>(color(0.8, 0.85, 0.88), 0.0);
+    shared_ptr<object>   box1     = make_shared<box>(point3(0, 0, 0), point3(165, 330, 165), aluminum);
+    box1                          = make_shared<rotate_y>(box1, 15);
+    box1                          = make_shared<translate>(box1, vec3(265, 0, 295));
+    objects.add(box1);
+
+    auto glass = make_shared<dielectric>(1.5);
+    objects.add(make_shared<sphere>(point3(190, 90, 190), point3(190, 90, 190), 0, 1, 90, glass));
+    world_box = bvh_node(objects.group, 0, objects.group.size(), 0.0, 0.1);
+    return world_box;
+}
+
+// 烟雾Cornell Box场景
+bvh_node& cornell_smoke() {
+
+    auto red   = make_shared<lambertian>(color(.65, .05, .05));
+    auto white = make_shared<lambertian>(color(.73, .73, .73));
+    auto green = make_shared<lambertian>(color(.12, .45, .15));
+    auto light = make_shared<diffuse_light>(color(7, 7, 7));
+
+    world.add(make_shared<yz_rect>(0, 555, 0, 555, 555, green));
+    world.add(make_shared<yz_rect>(0, 555, 0, 555, 0, red));
+    world.add(make_shared<xz_rect>(113, 443, 127, 432, 554, light));
+    world.add(make_shared<xz_rect>(0, 555, 0, 555, 555, white));
+    world.add(make_shared<xz_rect>(0, 555, 0, 555, 0, white));
+    world.add(make_shared<xy_rect>(0, 555, 0, 555, 555, white));
+
+    shared_ptr<object> box1 = make_shared<box>(point3(0, 0, 0), point3(165, 330, 165), white);
+    box1                    = make_shared<rotate_y>(box1, 15);
+    box1                    = make_shared<translate>(box1, vec3(265, 0, 295));
+
+    shared_ptr<object> box2 = make_shared<box>(point3(0, 0, 0), point3(165, 165, 165), white);
+    box2                    = make_shared<rotate_y>(box2, -18);
+    box2                    = make_shared<translate>(box2, vec3(130, 0, 65));
+
+    world.add(make_shared<constant_medium>(box1, 0.01, color(0, 0, 0)));
+    world.add(make_shared<constant_medium>(box2, 0.01, color(1, 1, 1)));
+    world_box = bvh_node(world, 0, 0);
+    return world_box;
+}
+
+// 新特性最终场景
+bvh_node& final_scene() {
+    // 高低起伏的盒子组成地面
+    auto ground = make_shared<lambertian>(color(0.48, 0.83, 0.53));
+
+    const int boxes_per_side = 20;
+    for (int i = 0; i < boxes_per_side; i++) {
+        for (int j = 0; j < boxes_per_side; j++) {
+            auto w  = 100.0;
+            auto x0 = -1000.0 + i * w;
+            auto z0 = -1000.0 + j * w;
+            auto y0 = 0.0;
+            auto x1 = x0 + w;
+            auto y1 = random_double(1, 101);
+            auto z1 = z0 + w;
+
+            world.add(make_shared<box>(point3(x0, y0, z0), point3(x1, y1, z1), ground));
+        }
+    }
+
+    // 光源
+    auto light = make_shared<diffuse_light>(color(7, 7, 7));
+    world.add(make_shared<xz_rect>(123, 423, 147, 412, 554, light));
+    // 移动的球体
+    auto center1                = point3(400, 400, 200);
+    auto center2                = center1 + vec3(30, 0, 0);
+    auto moving_sphere_material = make_shared<lambertian>(color(0.7, 0.3, 0.1));
+    world.add(make_shared<sphere>(center1, center2, 0, 1, 50, moving_sphere_material));
+    // 透明球体
+    world.add(make_shared<sphere>(point3(260, 150, 45), point3(260, 150, 45), 0, 1, 50, make_shared<dielectric>(1.5)));
+    // 金属球体
+    world.add(make_shared<sphere>(point3(0, 150, 145), point3(0, 150, 145), 0, 1, 50,
+                                  make_shared<metal>(color(0.8, 0.8, 0.9), 1.0)));
+
+    // 参与介质
+    auto boundary =
+        make_shared<sphere>(point3(360, 150, 145), point3(360, 150, 145), 0, 1, 70, make_shared<dielectric>(1.5));
+    world.add(boundary);
+    world.add(make_shared<constant_medium>(boundary, 0.01, color(0.2, 0.4, 0.9)));
+    boundary = make_shared<sphere>(point3(0, 0, 0), point3(0, 0, 0), 0, 1, 5000, make_shared<dielectric>(1.5));
+    world.add(make_shared<constant_medium>(boundary, .0001, color(1, 1, 1)));
+
+    // 地球
+    auto emat = make_shared<lambertian>(
+        make_shared<ZrRender::image_texture>("C:\\Program User\\code\\ZrRender\\texture\\texture.jpg"));
+    world.add(make_shared<sphere>(point3(400, 200, 400), point3(400, 200, 400), 0, 1, 100, emat));
+    // 噪声纹理
+    auto pertext = make_shared<perlin_noise_texture>(4);
+    world.add(
+        make_shared<sphere>(point3(220, 280, 300), point3(220, 280, 300), 0, 1, 80, make_shared<lambertian>(pertext)));
+
+    // 一堆小球
+    object_group boxes2;
+    auto         white = make_shared<lambertian>(color(.73, .73, .73));
+    int          ns    = 1000;
+    for (int j = 0; j < ns; j++) {
+        auto center = random_vec(0, 165);
+        boxes2.add(make_shared<sphere>(center, center, 0, 1, 10, white));
+    }
+    // 旋转平移一堆小球
+    world.add(make_shared<translate>(make_shared<rotate_y>(make_shared<bvh_node>(boxes2, 0.0, 1.0), 15),
+                                     vec3(-100, 270, 395)));
+
+    world_box = bvh_node(world.group, 0, world.group.size(), 0.0, 0.0);
+    return world_box;
+}
+
+int main() {
+    ZrRender::clock timer;
+    timer.start();
+
+    /****图片保存，保存为png格式****/
+    std::string SavePath = "C:/Program User/code/ZrRender/output/";
+    std::string filename = "BlendColor0.png";
+    std::string filepath = SavePath + filename;
+
+    /*******图片属性*******/
+    // 宽高比
+    auto      aspect_ratio = 1;    // 16.0 / 9.0
+    int       image_width  = 600;  // 1920 * 1080
+    int       image_height = static_cast<int>(image_width / aspect_ratio);
+    const int channel      = 3;
+    // 每个像素的采样数量
+    int samples_per_pixel = 100;
+    // 光线至少弹射次数
+    int min_bounce = 50;
+    // 俄罗斯轮盘赌算法生存概率
+    const double RR = 0.9;
+    // 背景颜色
+    color                    background(0, 0, 0);
+    std::shared_ptr<xz_rect> lights{};
+
+    point3 lookfrom;
+    point3 lookat;
+    auto   vfov     = 40.0;
+    auto   aperture = 0.0;
+
+    int sence = 0;
+    std::cout << "scene setup ...  scene number: " << sence << std::endl;
+
+    switch (sence) {
+        case 0:
+            world      = random_scene();
+            world_box  = bvh_node(world.group, 0, world.group.size(), 0.0, 0.1);
+            lookfrom   = point3(13, 2, 3);
+            lookat     = point3(0, 0, 0);
+            vfov       = 20.0;
+            aperture   = 0.1;
+            background = color(0.7, 0.8, 1.0);
+            std::cout << "start rendering random_scene" << std::endl;
+            break;
+        case 1:
+            world      = two_spheres();
+            world_box  = bvh_node(world.group, 0, world.group.size(), 0.0, 0.1);
+            lookfrom   = point3(13, 2, 3);
+            lookat     = point3(0, 0, 0);
+            vfov       = 20.0;
+            background = color(0.7, 0.8, 1.0);
+            std::cout << "start rendering two_spheres" << std::endl;
+            break;
+        case 2:
+            world      = two_perlin_spheres();
+            world_box  = bvh_node(world.group, 0, world.group.size(), 0.0, 0.1);
+            lookfrom   = point3(13, 2, 3);
+            lookat     = point3(0, 0, 0);
+            vfov       = 20.0;
+            background = color(0.7, 0.8, 1.0);
+            std::cout << "start rendering two_perlin_spheres" << std::endl;
+            break;
+        case 3:
+            world      = simple_light();
+            world_box  = bvh_node(world.group, 0, world.group.size(), 0.0, 0.1);
+            background = color(0, 0, 0);
+            lookfrom   = point3(26, 3, 6);
+            lookat     = point3(0, 2, 0);
+            vfov       = 20.0;
+            std::cout << "start rendering simple_light" << std::endl;
+            break;
+        case 4:
+            world_box         = cornell_box2();
+            lights            = make_shared<xz_rect>(213, 343, 227, 332, 554, shared_ptr<material>());
+            aspect_ratio      = 1.0;
+            image_width       = 600;
+            samples_per_pixel = 100;
+            background        = color(0, 0, 0);
+            lookfrom          = point3(278, 278, -800);
+            lookat            = point3(278, 278, 0);
+            vfov              = 40.0;
+            std::cout << "start rendering cornell_box" << std::endl;
+            break;
+        case 5:
+            world_box  = final_scene();
+            background = color(0, 0, 0);
+            lookfrom   = point3(478, 278, -600);
+            lookat     = point3(278, 278, 0);
+            vfov       = 40.0;
+            break;
+        case 6:
+            world     = image_texture_scene();
+            world_box = bvh_node(world.group, 0, world.group.size(), 0.0, 0.0);
+            lookfrom  = point3(13, 2, 3);
+            lookat    = point3(0, 0, 0);
+            vfov      = 20.0;
+            break;
+        case 7:
+            world_box         = cornell_smoke();
+            aspect_ratio      = 1.0;
+            image_width       = 600;
+            samples_per_pixel = 100;
+            lookfrom          = point3(278, 278, -800);
+            lookat            = point3(278, 278, 0);
+            vfov              = 40.0;
+            break;
+        default:
+            std::cerr << "No such scene." << std::endl;
+            break;
+    }
+
+    vec3   vup(0, 1, 0);
+    double dist_to_focus = 10.0;
+
+    /*******创建相机*******/
+    camera cam(lookfrom, lookat, vup, vfov, aspect_ratio, aperture, dist_to_focus, 0.0, 0.0);
+
+    /******渲染部分*****/
+    // 3通道图像存在一维数组中
+    unsigned char* target_odata = (unsigned char*)malloc(image_width * image_height * channel);
+    unsigned char* target_p     = target_odata;
+
+    auto rendering = [&](unsigned char*& data, int image_height, int image_width) {
+        for (int j = image_height - 1; j >= 0; --j) {
+            // 标准错误流显示进度信息，单行刷新显示
+#ifndef MUTLI_THREAD_RENDER
+            std::cerr << "\rScanlines remaining: " << j << ' ' << std::flush;
+#endif
+            for (int i = 0; i < image_width; ++i) {
+                color pixel_color(0, 0, 0);
+                for (int s = 0; s < samples_per_pixel; ++s) {
+                    // 在像素内部随机采样
+                    auto u = (i + random_double()) / (image_width - 1);
+                    auto v = (j + random_double()) / (image_height - 1);
+                    ray  r = cam.get_ray(u, v);
+                    // pixel_color += ray_color_with_bvh(r, world_box, min_bounce, RR);
+                    // pixel_color += ray_color_with_background(r, background, world_box, min_bounce, RR);
+                    // pixel_color += ray_color_without_bvh(r, background, world, min_bounce, RR);
+                    pixel_color += ray_color(r, background, world_box, lights, min_bounce, RR);
+                }
+                write_color(data, pixel_color, samples_per_pixel);
+            }
+        }
+    };
+// #define MUTLI_THREAD_RENDER
+#ifdef MUTLI_THREAD_RENDER
+#undef MUTLI_THREAD_RENDER
+    using Task = std::function<void(int, int)>;
+
+    Task task = [&](int blocks, int number) {
+        mutex mtx;
+
+        thread_local unsigned char* local_data = (unsigned char*)malloc(image_height * blocks);  // 线程的本地存储
+        rendering(local_data, image_height, blocks);  // 将渲染任务的结果存入本地存储中
+        mtx.lock();
+        int offset = number * image_height * blocks;
+        std::memcpy(target_p + offset, local_data, image_height * blocks);  // 将线程的本地存取写入全局的数组
+        mtx.unlock();
+        free(local_data);
+        local_data = nullptr;
+    };
+
+    int threads_num = std::thread::hardware_concurrency();
+    int block_size  = image_width / threads_num;
+
+    std::vector<jthread> threads(threads_num);
+
+    for (int i = 0; i < 8; i++) {
+        threads[i] = jthread(task, block_size, i);
+    }
+
+#else
+    // 单线程渲染
+    // 3通道图像存在一维数组中
+    rendering(target_p, image_height, image_width);
+#endif
+    stbi_write_png(filepath.c_str(), image_width, image_height, channel, target_odata, 0);
+    free(target_odata);
+    target_odata = nullptr;
+    target_p     = nullptr;
+    timer.stop();
+    auto [minutes, seconds] = timer.elapsed_minutes_and_seconds();
+    std::cerr << "\nDone.Elapsed time: " << minutes << " minutes and " << seconds << " seconds." << std::endl;
+
+    return 0;
+}

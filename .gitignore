@@ -1,0 +1,7 @@
+.clangd
+.clang-tidy
+.clang-format
+
+build/
+output/
+.vscode/
